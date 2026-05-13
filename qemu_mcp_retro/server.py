@@ -239,21 +239,62 @@ async def qemu_screendump_png(session_id: str, host_path: str) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+async def qemu_attach_scratch_disk(session_id: str, host_path: str,
+                                   size_mb: int = 4,
+                                   device_name: str = "scratch0") -> dict[str, Any]:
+    """Hot-attach an empty raw disk to a running guest.
+
+    The disk is created at host_path (host-visible) with the specified
+    size and attached as an IDE drive. From inside the guest, write to
+    /dev/hd1c (or equivalent) with `dd`. After detach, the host file
+    contains the written bytes at offset 0.
+
+    Use case: file extraction. Run this, then qemu_sendkeys
+    `dd if=/path/to/guest/file of=/dev/hd1c bs=512`, then qemu_kill the
+    session, and read host_path on the host.
+    """
+    sess = SESSIONS.get(session_id)
+    if not sess:
+        raise ValueError(f"unknown session_id: {session_id}")
+    # Create the empty disk on the host.
+    import subprocess as sp
+    sp.run(["truncate", "-s", f"{size_mb}M", host_path], check=True)
+    # Add via QMP: blockdev-add + device_add.
+    await _qmp(sess, "blockdev-add",
+               **{"driver": "file", "filename": host_path,
+                  "node-name": device_name + "-file"})
+    await _qmp(sess, "blockdev-add",
+               **{"driver": "raw", "file": device_name + "-file",
+                  "node-name": device_name + "-raw"})
+    await _qmp(sess, "device_add",
+               **{"driver": "ide-hd",
+                  "drive": device_name + "-raw",
+                  "id": device_name})
+    return {"device_id": device_name, "host_path": host_path,
+            "size_mb": size_mb}
+
+
+@mcp.tool()
 async def qemu_extract_fs_file(session_id: str, guest_path: str,
                                host_path: str) -> dict[str, Any]:
     """Extract a file from the running guest's filesystem to the host.
 
-    Strategy: hot-plug an empty raw disk via QMP `blockdev-add`, drive
-    the guest (via serial) to `dd` the file onto that disk, detach the
-    disk, then read the file out by parsing the V7 fs structures on the
-    host side using tools/host-v7put / tools/aout/.
+    Implementation uses a scratch-disk approach:
+      1. Hot-attach an empty raw disk via QMP blockdev-add + device_add.
+      2. Have the guest `dd if=GUEST_PATH of=/dev/hd1c bs=512` (caller
+         must drive this via qemu_sendkeys + qemu_sendkeys('sync\\n')).
+      3. Detach disk.
+      4. Read host_path; the file's bytes are at offset 0.
 
-    Phase Q stage 2 (not implemented in scaffold).
+    This function does steps 1 and 3 + the host-side bookkeeping. The
+    guest-side `dd` is the CALLER'S RESPONSIBILITY (this MCP server
+    cannot anticipate the guest's device-naming convention; e.g.
+    /dev/hd1c on V7/x86, /dev/hdb on Linux, etc.).
     """
     raise NotImplementedError(
-        "qemu_extract_fs_file: stage-2 implementation pending. "
-        "Workaround: attach a second disk at boot time and have the guest "
-        "write to it with `dd if=<file> of=/dev/hd1` then read host-side.")
+        "qemu_extract_fs_file: use qemu_attach_scratch_disk + "
+        "qemu_sendkeys('dd if=PATH of=/dev/hd1c bs=512\\n') + qemu_kill, "
+        "then read the scratch host_path on the host side.")
 
 
 # ---------------------------------------------------------------------------
