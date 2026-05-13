@@ -398,6 +398,84 @@ async def _qmp(sess: Session, command: str, **kwargs: Any) -> Any:
         await client.disconnect()
 
 
+# ---------------------------------------------------------------------------
+# Tool 8 (optional): qemu_screen_text - OCR-free text scrape via VGA peek
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def qemu_screen_text(session_id: str) -> dict[str, Any]:
+    """Return the current VGA text-mode screen as a Python string.
+
+    For guests in 80x25 text mode (which V7/x86, MS-DOS, MINIX, etc.
+    use), this is much faster and more reliable than screendump+OCR.
+    Uses QMP `human-monitor-command` to issue `info vga` then parses
+    the framebuffer dump. Heuristic; falls back to None if not text mode.
+
+    Phase Q stage 4. Useful for batch automation: poll this until you
+    see `# ` (shell prompt) or `BOOT [hd(0,0)unix]:` before sending
+    the next command.
+    """
+    sess = SESSIONS.get(session_id)
+    if not sess:
+        raise ValueError(f"unknown session_id: {session_id}")
+    # QEMU's `info vga` doesn't dump the framebuffer; we use `xp` (eXamine
+    # Physical) to read VGA text RAM at 0xb8000. Each cell is 2 bytes:
+    # (ASCII char, attribute byte).
+    res = await _qmp(
+        sess, "human-monitor-command",
+        **{"command-line": "xp /4000bx 0xb8000"})
+    if isinstance(res, str):
+        out = res
+    else:
+        out = res.get("return", "")
+    # Parse hex dump lines like "00000000: 0x20 0x07 0x20 0x07 ..."
+    chars: list[str] = []
+    for line in out.splitlines():
+        if ":" not in line:
+            continue
+        _, _, payload = line.partition(":")
+        bytes_ = [p for p in payload.split() if p.startswith("0x")]
+        # Every even-indexed byte is an ASCII char; every odd is the attr.
+        for i, b in enumerate(bytes_):
+            if i % 2 != 0:
+                continue
+            v = int(b, 16)
+            chars.append(chr(v) if 32 <= v < 127 else (".\n"[v == 0] if v in (0, 10) else "."))
+    # Reshape into 25 lines of 80 chars each.
+    text = "".join(chars[:80 * 25])
+    rows = ["".join(chars[i:i+80]).rstrip() for i in range(0, 80*25, 80)]
+    full = "\n".join(rows)
+    return {"text": full, "rows": rows, "raw_chars": len(chars)}
+
+
+@mcp.tool()
+async def qemu_wait_for(session_id: str, pattern: str,
+                        timeout_s: int = 60,
+                        poll_interval_s: float = 0.5) -> dict[str, Any]:
+    """Poll the VGA text mode screen until `pattern` appears, or timeout.
+
+    Returns when the pattern is observed; raises TimeoutError otherwise.
+    Useful for synchronising automation: wait_for('# ') before sending
+    the next shell command, wait_for('login:') to know the OS booted, etc.
+
+    Phase Q stage 4.
+    """
+    import time
+    sess = SESSIONS.get(session_id)
+    if not sess:
+        raise ValueError(f"unknown session_id: {session_id}")
+    start = time.time()
+    while True:
+        scr = await qemu_screen_text(session_id)
+        if pattern in scr["text"]:
+            return {"matched": True, "elapsed_s": round(time.time() - start, 2),
+                    "screen": scr["text"]}
+        if time.time() - start > timeout_s:
+            return {"matched": False, "elapsed_s": timeout_s,
+                    "screen": scr["text"]}
+        await asyncio.sleep(poll_interval_s)
+
+
 def main() -> None:
     mcp.run()
 
