@@ -143,20 +143,42 @@ _ASCII_TO_QEMU_KEY: dict[str, str] = {
 }
 
 
-def _str_to_keys(s: str) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
+def _str_to_keystrokes(s: str) -> list[list[dict[str, str]]]:
+    """Each element of the outer list is a single send-key call (one
+    chord: all keys pressed simultaneously). Uppercase letters and
+    shift-decorated chars produce 2-key chords (shift + base)."""
+    out: list[list[dict[str, str]]] = []
     for c in s:
         if c.isalpha():
             if c.isupper():
-                out.append({"type": "qcode", "data": f"shift-{c.lower()}"})
+                out.append([
+                    {"type": "qcode", "data": "shift"},
+                    {"type": "qcode", "data": c.lower()},
+                ])
             else:
-                out.append({"type": "qcode", "data": c})
+                out.append([{"type": "qcode", "data": c}])
         elif c.isdigit():
-            out.append({"type": "qcode", "data": c})
+            out.append([{"type": "qcode", "data": c}])
         elif c in _ASCII_TO_QEMU_KEY:
-            out.append({"type": "qcode", "data": _ASCII_TO_QEMU_KEY[c]})
+            out.append([{"type": "qcode", "data": _ASCII_TO_QEMU_KEY[c]}])
+        elif c in SHIFT:
+            out.append([
+                {"type": "qcode", "data": "shift"},
+                {"type": "qcode", "data": SHIFT[c]},
+            ])
         # Else: silently skip (extend map as needed).
     return out
+
+
+SHIFT: dict[str, str] = {
+    '!': '1', '@': '2', '#': '3', '$': '4', '%': '5',
+    '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
+    '_': 'minus', '+': 'equal',
+    '{': 'bracket_left', '}': 'bracket_right',
+    ':': 'semicolon', '"': 'apostrophe',
+    '<': 'comma', '>': 'dot', '?': 'slash',
+    '|': 'backslash', '~': 'grave_accent',
+}
 
 
 @mcp.tool()
@@ -170,12 +192,19 @@ async def qemu_sendkeys(session_id: str, keys: str | list[str],
     sess = SESSIONS.get(session_id)
     if not sess:
         raise ValueError(f"unknown session_id: {session_id}")
+    results = []
     if isinstance(keys, str):
-        key_arr = _str_to_keys(keys)
+        chords = _str_to_keystrokes(keys)
     else:
-        key_arr = [{"type": "qcode", "data": k} for k in keys]
-    return await _qmp(sess, "send-key",
-                      keys=key_arr, **({"hold-time": hold_ms} if hold_ms else {}))
+        chords = [[{"type": "qcode", "data": k}] for k in keys]
+    for chord in chords:
+        r = await _qmp(
+            sess, "send-key",
+            keys=chord,
+            **({"hold-time": hold_ms} if hold_ms else {}),
+        )
+        results.append(r)
+    return {"chords_sent": len(chords)}
 
 
 # ---------------------------------------------------------------------------
