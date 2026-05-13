@@ -1,0 +1,21 @@
+[project]
+name = "qemu-mcp-retro"
+version = "0.1.0"
+description = "MCP server for headless retro x86 OS work under qemu-system-i386"
+readme = "README.md"
+license = { text = "BSD-2-Clause" }
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0",
+    "qemu.qmp>=0.0.3",
+]
+
+[project.scripts]
+qemu-mcp-retro = "qemu_mcp_retro.server:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["qemu_mcp_retro*"]
